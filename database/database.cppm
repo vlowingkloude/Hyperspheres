@@ -52,14 +52,6 @@ export namespace hyperspheres::database {
             switch (db_config->distance_function) {
                 case hyperspheres::supported::SupportedDistanceFunctions::SquaredL2Distance:
                     thread_pool->context->dist_func = hyperspheres::distance::squared_l2_distance;
-                    if (db_config->pruning_mode == hyperspheres::supported::PruningMode::Safe) {
-                        thread_pool->context->prune_check_func = [](T dist_to_anchor, T in_page_max, T worst) {
-                            return (dist_to_anchor > in_page_max) && ((dist_to_anchor + in_page_max > worst)) &&
-                                ( ((dist_to_anchor + in_page_max - worst) * (dist_to_anchor + in_page_max - worst)) >  4 * dist_to_anchor * in_page_max);
-                        };
-                    } else if (db_config->pruning_mode == hyperspheres::supported::PruningMode::AggressiveDistance) {
-                        thread_pool->context->prune_check_func = [](T dist_to_anchor, T in_page_max, T worst) {return dist_to_anchor - in_page_max > worst;};
-                    }
                     break;
                 default:
                     throw std::invalid_argument("Unknown distance function");
@@ -86,13 +78,13 @@ export namespace hyperspheres::database {
     template <typename T>
     std::unique_ptr<Database<T>> create_database(const std::string& path, const std::size_t page_size, const std::size_t file_size,
             const hyperspheres::supported::SupportedDataType dtype, const std::size_t dim,
-            const hyperspheres::supported::SupportedDistanceFunctions distance_function, const hyperspheres::supported::PruningMode pruning_mode,
+            const hyperspheres::supported::SupportedDistanceFunctions distance_function,
             const std::size_t n_threads, const std::size_t local_distance_buffers_size) {
         {
             const std::filesystem::path dbpath{path};
             std::filesystem::create_directory(dbpath);
             hyperspheres::execution::storage::create_storage(path, page_size, file_size, dtype, dim);
-            hyperspheres::execution::storage::create_config_file(path, dtype, distance_function, pruning_mode, page_size, file_size, dim);
+            hyperspheres::execution::storage::create_config_file(path, dtype, distance_function, page_size, file_size, dim);
         }
         auto db = std::make_unique<Database<T>>(path, n_threads, local_distance_buffers_size);
         db->thread_pool->context->thread_local_output_buffer1 = db->local_distance_buffers;

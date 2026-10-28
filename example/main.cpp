@@ -72,7 +72,8 @@ namespace {
             }
             std::unordered_set<int> truth(gt[i].begin(), gt[i].begin() + static_cast<long>(k));
             std::size_t hits = 0;
-            for (const auto& id : results[i]) {
+            std::unordered_set<std::size_t> result (results[i].begin(), results[i].end());
+            for (const auto& id : result) {
                 if (truth.contains(static_cast<int>(id))) {
                     ++hits;
                 }
@@ -125,12 +126,16 @@ namespace {
     }
 }
 
+bool customized_prune_check_func(float dist_to_anchor, float in_page_max, float worst, float beta) {
+    return dist_to_anchor > in_page_max && dist_to_anchor > worst;
+}
+
 int main() {
     std::string path = "testdb";
-    std::string vector_path = "./gist";
+    std::string vector_path = "./dim_1024";
 
     constexpr std::size_t n_embeddings = 1000000;
-    constexpr std::size_t n_dim = 960;
+    constexpr std::size_t n_dim = 1024;
     constexpr std::size_t n_queries = 1000;
     constexpr std::size_t k = 100;
 
@@ -139,11 +144,11 @@ int main() {
         // prefill
         ScopedTimer timer(build_ms);
         std::filesystem::remove_all(path);
-        std::vector<std::vector<float>> vectors = read_file_as_vectors(vector_path + "/gist_base.fvecs", n_embeddings, n_dim);
+        std::vector<std::vector<float>> vectors = read_file_as_vectors(vector_path + "/base.fvecs", n_embeddings, n_dim);
         std::vector<std::size_t> ids(n_embeddings);
         std::iota(ids.begin(), ids.end(), 0);
         auto db = hyperspheres::create_database<float>(path, n_dim,
-            hyperspheres::SupportedDistanceFunctions::SquaredL2Distance,hyperspheres::PruningMode::AggressiveDistance);
+            hyperspheres::SupportedDistanceFunctions::SquaredL2Distance);
         hyperspheres::batch_prefill_parallel(db, vectors, ids);
     }
     std::cout << build_ms / 1000 << std::endl;
@@ -153,13 +158,13 @@ int main() {
         //
         ScopedTimer timer(query_ms);
         auto db = hyperspheres::load_database<float>(path);
-        auto queries = read_file_as_flat_array(vector_path + "/gist_query.fvecs", n_queries, n_dim);
+        auto queries = read_file_as_flat_array(vector_path + "/query.fvecs", n_queries, n_dim);
         std::vector<std::vector<std::size_t>> results(n_queries);
         for (std::size_t query = 0; query < n_queries; ++query) {
             const auto nearest = hyperspheres::find_k_nearest(
                 db,
-                std::span<float>(queries.data() + query * n_dim, n_dim),
-                k, 0,1);
+                std::span<float>(queries.data() + query * n_dim, n_dim), 0.7, true,
+                k, 0,1, customized_prune_check_func);
             auto& row = results[query];
             row.reserve(nearest.size());
             for (const auto& [distance, id] : nearest) {
@@ -167,7 +172,7 @@ int main() {
                 row.push_back(id);
             }
         }
-        const auto ground_truth = read_gt_vectors(vector_path + "/gist_groundtruth.ivecs", n_queries, k);
+        const auto ground_truth = read_gt_vectors(vector_path + "/groundtruth.ivecs", n_queries, k);
         auto rec = recall(results, ground_truth, k);
         std::cout << rec << std::endl;
     }

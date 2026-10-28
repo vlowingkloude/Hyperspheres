@@ -24,7 +24,6 @@ export namespace hyperspheres::execution::storage {
     void create_config_file(const std::string& name,
         const hyperspheres::supported::SupportedDataType dtype,
         const hyperspheres::supported::SupportedDistanceFunctions distance_function,
-        const hyperspheres::supported::PruningMode pruning_mode,
         const std::size_t page_size, const std::size_t file_size, const std::size_t dim) {
         const auto path = name + "/" + hyperspheres::defaults::config_filename;
         const auto config_file = memorymap::MappedFile(path, memorymap::MmapMode::Write, sizeof(hyperspheres::structures::DatabaseConfig));
@@ -34,7 +33,6 @@ export namespace hyperspheres::execution::storage {
         config->file_size = file_size;
         config->dim = dim;
         config->distance_function = distance_function;
-        config->pruning_mode = pruning_mode;
         config->dtype = dtype;
     }
 
@@ -56,9 +54,6 @@ export namespace hyperspheres::execution::storage {
             case hyperspheres::supported::SupportedDataType::Float:
                 element_size = sizeof(float);
                 break;
-            case hyperspheres::supported::SupportedDataType::Double:
-                element_size = sizeof(double);
-                break;
             default:
                 throw std::invalid_argument("Unsupported data type");
         }
@@ -74,9 +69,6 @@ export namespace hyperspheres::execution::storage {
         switch (config->dtype) {
             case hyperspheres::supported::SupportedDataType::Float:
                 element_size = sizeof(float);
-                break;
-            case hyperspheres::supported::SupportedDataType::Double:
-                element_size = sizeof(double);
                 break;
             default:
                 throw std::invalid_argument("Unsupported data type");
@@ -504,7 +496,8 @@ export namespace hyperspheres::execution::parallel {
         std::atomic<std::size_t> shared_index {};
         std::atomic<bool> thread_control {false}; // usually to tell threads that they can stop
         T (*dist_func)(std::span<T>, std::span<T>) {};
-        bool (*prune_check_func)(T, T, T) {};
+        float pruning_beta {1};
+        bool (*prune_check_func)(T, T, T, float) {};
 
         explicit ParallelContext(hyperspheres::storage::Storage& db_storage) : db_storage(db_storage) {}
     };
@@ -614,7 +607,7 @@ namespace hyperspheres::execution::parallel::workers {
                     std::ranges::push_heap(heap.begin(), heap.begin() + n_outputs);
                 }
             }
-            if (heap[0].first < current_global_max) {
+            if (heap[0].first < current_global_max && n_outputs == max_num_vectors_in_page) {
                 auto up_to_date_max = context->shared_data.load();
                 while (true) {
                     auto proposed_new_max = heap[0].first;
@@ -648,6 +641,7 @@ namespace hyperspheres::execution::parallel::workers {
         const auto max_morsel = context->max_morsel;
         const auto step = context->morsel_step;
         const auto k = context->scalar_input1;
+        const float beta = context->pruning_beta;
         auto func = context->dist_func;
 
         while (true) {
@@ -660,7 +654,7 @@ namespace hyperspheres::execution::parallel::workers {
                 const auto [dist_to_anchor, page_idx] = context->vector_input1[current];
                 const auto max = hyperspheres::execution::storage::get_max_dist_at<T>(context->db_storage, page_idx);
                 // todo: we will generalize here gradually
-                if (context->prune_check_func(dist_to_anchor, max, current_global_max)) {
+                if (context->prune_check_func(dist_to_anchor, max, current_global_max, beta)) {
                     continue;
                 }
                 if (n_outputs < k) {
@@ -668,7 +662,7 @@ namespace hyperspheres::execution::parallel::workers {
                     heap[n_outputs++] = {dist_to_anchor, vector_id};
                     std::ranges::push_heap(heap.begin(), heap.begin() + n_outputs);
                 } else {
-                    if (context->prune_check_func(dist_to_anchor, max, heap[0].first)) {
+                    if (context->prune_check_func(dist_to_anchor, max, heap[0].first, beta)) {
                         continue;
                     }
                     if (heap[0].first > dist_to_anchor) {
@@ -694,7 +688,7 @@ namespace hyperspheres::execution::parallel::workers {
                     }
                 }
             }
-            if (heap[0].first < current_global_max) {
+            if (heap[0].first < current_global_max && n_outputs == k) {
                 auto up_to_date_max = context->shared_data.load();
                 while (true) {
                     auto proposed_new_max = heap[0].first;

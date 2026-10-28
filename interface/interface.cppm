@@ -34,19 +34,16 @@ export namespace hyperspheres {
         const std::string& path,
         const std::size_t dim,
         const supported::SupportedDistanceFunctions distance_function,
-        const supported::PruningMode pruning_mode = supported::PruningMode::AggressiveDistance,
         const std::size_t page_size = defaults::default_page_size,
         const std::size_t file_size = defaults::default_single_file_size,
         const std::size_t n_threads = std::thread::hardware_concurrency(),
         const std::size_t local_distance_buffers_size = defaults::default_thread_local_buffer_size
         ) {
         supported::SupportedDataType dtype;
-        if constexpr (std::is_same_v<T, double>) {
-            dtype = supported::SupportedDataType::Double;
-        } else if constexpr (std::is_same_v<T, float>) {
+        if constexpr (std::is_same_v<T, float>) {
             dtype = supported::SupportedDataType::Float;
         }
-        return database::create_database<T>(path, page_size, file_size, dtype, dim, distance_function, pruning_mode, n_threads, local_distance_buffers_size);
+        return database::create_database<T>(path, page_size, file_size, dtype, dim, distance_function, n_threads, local_distance_buffers_size);
     }
 
     template <typename T>
@@ -87,7 +84,11 @@ export namespace hyperspheres {
         std::size_t page_idx {0};
         std::unordered_set<std::size_t> vector_indices;
         vector_indices.reserve(max_num_vectors_in_page);
-        context->morsel_step = new_vectors.size() / database->thread_pool->n_threads / 2;
+        auto morsel_step = new_vectors.size() / database->thread_pool->n_threads / 2;
+        if (morsel_step == 0) {
+            morsel_step = 1;
+        }
+        context->morsel_step = morsel_step;
         while (true) {
             if (new_vectors.empty()) {
                 execution::storage::update_anchor_cache_single_threaded(database->db_storage, database->cached_vectors);
@@ -101,6 +102,11 @@ export namespace hyperspheres {
             hyperspheres::execution::parallel::submit_and_block(database->thread_pool);
             std::size_t temp_offset = 0;
             for (std::size_t ti = 0; ti < database->thread_pool->n_threads; ti++) {
+                temp_offset += database->n_outputs[ti];
+            }
+            database->internal_buffer.resize(temp_offset);
+            temp_offset = 0;
+            for (std::size_t ti = 0; ti < database->thread_pool->n_threads; ti++) {
                 const auto n_out = database->n_outputs[ti];
                 std::memcpy(
                     database->internal_buffer.data() + temp_offset,
@@ -108,7 +114,6 @@ export namespace hyperspheres {
                     );
                 temp_offset += n_out;
             }
-            database->internal_buffer.resize(temp_offset);
             std::size_t n_vectors = max_num_vectors_in_page;
             if (temp_offset < n_vectors) {
                 n_vectors = temp_offset;
@@ -144,11 +149,29 @@ export namespace hyperspheres {
 
     template <typename T>
     std::vector<IdTaggedDistance<T>> find_k_nearest(std::unique_ptr<database::Database<T>> &db,
-        std::span<T> query,
-        const std::size_t k, const std::size_t n_pages_to_probe = 0, const std::size_t step = 1) {
+        std::span<T> query, const float beta, const bool aggressive,
+        const std::size_t k, const std::size_t n_pages_to_probe = 0, const std::size_t step = 1,
+        bool (*customized_prune_check_func)(T, T, T, float) = nullptr) {
         std::vector<IdTaggedDistance<T>> result;
         result.reserve(k);
         const auto context = db->thread_pool->context;
+        context->pruning_beta = beta;
+        if (aggressive) {
+            if (beta == 1.0) {
+                context->prune_check_func = [](T dist_to_anchor, T in_page_max, T worst, float beta)  {return dist_to_anchor - in_page_max > worst;};
+            } else {
+                //context->prune_check_func = [](T dist_to_anchor, T in_page_max, T worst, float beta) {return dist_to_anchor > worst && dist_to_anchor > in_page_max && dist_to_anchor - in_page_max * beta > worst; };
+                context->prune_check_func = [](T dist_to_anchor, T in_page_max, T worst, float beta) {return dist_to_anchor > in_page_max && dist_to_anchor - in_page_max * beta > worst; };
+            }
+        } else {
+            context->prune_check_func = [](T dist_to_anchor, T in_page_max, T worst, float beta) {
+                return (dist_to_anchor > in_page_max) && ((dist_to_anchor + in_page_max > worst)) &&
+                    ( ((dist_to_anchor + in_page_max - worst) * (dist_to_anchor + in_page_max - worst)) >  4 * dist_to_anchor * in_page_max);
+            };
+        }
+        if (customized_prune_check_func != nullptr) {
+            context->prune_check_func = customized_prune_check_func;
+        }
         context->vector_input2 = query;
         context->vector_input3 = db->cached_vectors;
         if (db->cached_max_dists.size() > db->thread_pool->n_threads * 2) [[likely]] {
@@ -168,7 +191,11 @@ export namespace hyperspheres {
             db->cached_max_dists, db->dist_to_anchor_buffer, query, db->thread_pool->context->dist_func, true);
         }
         context->next_morsel.store(0);
-        context->max_morsel = n_pages_to_probe == 0 ? db->dist_to_anchor_buffer.size() : n_pages_to_probe;
+        if (n_pages_to_probe == 0 || n_pages_to_probe > db->dist_to_anchor_buffer.size()) {
+            context->max_morsel = db->dist_to_anchor_buffer.size();
+        } else {
+            context->max_morsel = n_pages_to_probe;
+        }
         context->task = hyperspheres::execution::parallel::ParallelTask::FindKnn;
         context->scalar_input1 = k;
         context->morsel_step = step;
@@ -187,7 +214,7 @@ export namespace hyperspheres {
         }
         db->internal_buffer.resize(temp_offset);
         std::ranges::sort(db->internal_buffer);
-        for (std::size_t ik = 0; ik < k; ik++) {
+        for (std::size_t ik = 0; ik < std::min(k, temp_offset); ik++) {
             result.push_back(db->internal_buffer[ik]);
         }
         return std::move(result);

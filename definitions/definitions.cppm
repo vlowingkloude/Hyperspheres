@@ -36,8 +36,7 @@ export namespace hyperspheres::defaults {
 export namespace hyperspheres::supported {
 
     enum class SupportedDataType : uint8_t {
-        Float,
-        Double
+        Float
     };
 
     enum class SupportedDistanceFunctions : uint8_t {
@@ -46,7 +45,7 @@ export namespace hyperspheres::supported {
 
     enum class PruningMode : uint8_t {
         Safe,
-        AggressiveDistance
+        Aggressive
     };
 
 }
@@ -60,7 +59,6 @@ export namespace hyperspheres::structures {
     struct DatabaseConfig {
         hyperspheres::supported::SupportedDataType dtype {supported::SupportedDataType::Float};
         hyperspheres::supported::SupportedDistanceFunctions distance_function {supported::SupportedDistanceFunctions::SquaredL2Distance};
-        hyperspheres::supported::PruningMode pruning_mode {hyperspheres::supported::PruningMode::AggressiveDistance};
         std::size_t page_size {defaults::default_page_size};
         std::size_t file_size {defaults::default_single_file_size};
         std::size_t dim {1024};
